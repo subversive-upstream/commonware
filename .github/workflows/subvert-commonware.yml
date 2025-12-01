@@ -18,7 +18,17 @@ jobs:
         subrepo:
           [
             broadcast,
+            codec,
             coding,
+            cryptography,
+            examples,
+            macros,
+            p2p,
+            resolver,
+            runtime,
+            storage,
+            stream,
+            utils,
           ]
     name: Publish to subversive-upstream/commonware-${{ matrix.subrepo }} repository
     runs-on: ubuntu-latest
