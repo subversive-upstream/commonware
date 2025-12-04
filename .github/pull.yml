@@ -1,6 +1,6 @@
 version: "1"
 rules:
   - base: master
-    upstream: commonware:master # change `wei` to the owner of upstream repo
+    upstream: subversive-upstream:master
     mergeMethod: merge
     mergeUnstable: true
