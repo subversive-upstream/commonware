@@ -13,7 +13,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{authenticated::discovery, utils::requester};
+use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{tokio, Metrics, Quota};
 use commonware_utils::{union, union_unique, NZU32};
 use futures::future::try_join_all;
@@ -74,7 +74,11 @@ pub async fn run<S, L>(
         &p2p_namespace,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), config.port),
-        config.bootstrappers.clone().into_iter().collect::<Vec<_>>(),
+        config
+            .bootstrappers
+            .iter()
+            .map(|(k, v)| (k.clone(), (*v).into()))
+            .collect::<Vec<_>>(),
         MAX_MESSAGE_SIZE,
     );
     p2p_cfg.mailbox_size = MAILBOX_SIZE;
@@ -108,12 +112,8 @@ pub async fn run<S, L>(
         manager: oracle.clone(),
         blocker: oracle.clone(),
         mailbox_size: 200,
-        requester_config: requester::Config {
-            me: Some(config.signing_key.public_key()),
-            rate_limit: marshal_limit,
-            initial: Duration::from_secs(1),
-            timeout: Duration::from_secs(2),
-        },
+        initial: Duration::from_secs(1),
+        timeout: Duration::from_secs(2),
         fetch_retry_timeout: Duration::from_millis(100),
         priority_requests: false,
         priority_responses: false,
@@ -376,12 +376,8 @@ mod test {
                 manager: oracle.manager(),
                 blocker: oracle.control(pk.clone()),
                 mailbox_size: 200,
-                requester_config: requester::Config {
-                    me: Some(pk.clone()),
-                    rate_limit: Quota::per_second(NZU32!(5)),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                },
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
