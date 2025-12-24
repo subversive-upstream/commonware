@@ -1,4 +1,4 @@
-# .github/workflows/subvert-sync.yml
+name: Sync to Commonware
 on:
   schedule:
   - cron:  "*/120 * * * *"
