@@ -1,0 +1,18 @@
+# .github/workflows/subvert-sync.yml
+on:
+  schedule:
+  - cron:  "*/120 * * * *"
+  workflow_dispatch:
+
+jobs:
+  git-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: git-sync
+        uses: wei/git-sync@v3
+        with:
+          source_repo: "commonwarexyz/monorepo"
+          source_branch: "refs/tags/*"
+          destination_repo: "subversive-upstream/commonware"
+          destination_branch: "refs/tags/*"
+          
