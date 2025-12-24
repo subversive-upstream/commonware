@@ -1,18 +1,21 @@
-name: Sync to Commonware
+name: Commonware Synchronize
+
 on:
   schedule:
-  - cron:  "*/120 * * * *"
+  - cron:  "*/15 * * * *"
   workflow_dispatch:
 
 jobs:
-  git-sync:
+  repo-sync:
     runs-on: ubuntu-latest
     steps:
-      - name: git-sync
-        uses: wei/git-sync@v3
-        with:
-          source_repo: "commonwarexyz/monorepo"
-          source_branch: "refs/tags/*"
-          destination_repo: "subversive-upstream/commonware"
-          destination_branch: "refs/tags/*"
-          
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+    - name: repo-sync
+      uses: repo-sync/github-sync@v2
+      with:
+        source_repo: "commonwarexyz/monorepo"
+        source_branch: "main"
+        destination_branch: "main"
+        sync_tags: "true"
