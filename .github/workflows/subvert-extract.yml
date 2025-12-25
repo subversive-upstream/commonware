@@ -1,10 +1,10 @@
 name: Commonware Extract
 
 on:
-  push:
-    branches:
-      - main
-      - master
+  workflow_run:
+    workflows: ["Commonware Synchronize"]
+    types:
+      - completed
   workflow_call:
     secrets:
       SUBVERT_TOKEN:
