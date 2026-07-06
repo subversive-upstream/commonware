@@ -123,3 +123,43 @@ runs:
         cache-workspace-crates: false
         workspaces: . -> ${{ steps.rust-cache-workspace.outputs.target }}
         cache-bin: true
+
+    # rust-cache and sccache cover different parts of the build. rust-cache
+    # restores Cargo state: downloaded crates, git dependencies, installed
+    # binaries, and dependency artifacts in target. It is keyed by the job,
+    # toolchain, Cargo files, and the matrix-specific cache key above, so it is
+    # a good coarse restore for a job's expected build graph.
+    #
+    # sccache sits underneath Cargo as RUSTC_WRAPPER and caches individual
+    # compiler outputs. That makes it useful when the target cache is missing,
+    # stale, cleaned, or split across many CI partitions. It can also hit for
+    # unchanged crates when rust-cache misses its coarser key after Cargo.lock
+    # or workflow matrix changes. The same jobs allowed to save rust-cache on
+    # main write to the compiler cache; all other jobs read without replacing
+    # shared entries.
+    - name: Setup sccache
+      if: inputs.rust-cache-enabled == 'true'
+      uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+    - name: Configure sccache
+      if: inputs.rust-cache-enabled == 'true'
+      shell: bash
+      run: |
+        if [ "$GITHUB_REF" = "refs/heads/main" ] && [ "${{ inputs.rust-cache-save }}" = "true" ]; then
+          sccache_rw_mode="READ_WRITE"
+        else
+          sccache_rw_mode="READ_ONLY"
+        fi
+
+        sccache_config="${RUNNER_TEMP}/sccache-config.toml"
+        cat > "$sccache_config" <<EOF
+        server_startup_timeout_ms = 60000
+
+        [cache.gha]
+        enabled = true
+        version = ""
+        rw_mode = "$sccache_rw_mode"
+        EOF
+
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_CONF=$sccache_config" >> "$GITHUB_ENV"
