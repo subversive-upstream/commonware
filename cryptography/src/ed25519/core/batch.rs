@@ -124,7 +124,7 @@ impl Verifier {
             .map(|_| Summary::random(&mut rng))
             .collect();
 
-        strategy.run(
+        strategy.try_run(
             total,
             // Serial verification checks the whole batch as one equation, so
             // coalescing is global and no partition is needed.
@@ -139,18 +139,17 @@ impl Verifier {
                     .chunks(shard_size)
                     .zip(seeds.iter().copied())
                     .collect();
-                manual.fold(
+                manual.try_fold(
                     shards,
-                    || Ok(()),
-                    |result, (shard, seed)| {
-                        result?;
+                    || (),
+                    |_, (shard, seed)| {
                         Self::verify_shard(
                             shard.iter().map(|&idx| &self.signatures[idx]),
                             shard.len(),
                             seed,
                         )
                     },
-                    |left, right| left.and(right),
+                    |_, _| (),
                 )
             },
         )
