@@ -142,7 +142,12 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// A memory resident Merkle structure used to build the structure and cache updates. It caches
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
     /// and the full structure's pruning boundary.
-    pub(crate) mem: Mem<F, D>,
+    ///
+    /// Held in an [`Arc`] so [`Merkle::snapshot`] can hand a zero-copy, immutable view to jobs
+    /// running off the calling task. Mutations go through [`Arc::make_mut`]: they are in-place
+    /// while no snapshot is alive and copy-on-write otherwise, so a snapshot never observes
+    /// later mutations.
+    pub(crate) mem: Arc<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
     /// pruned.
@@ -273,7 +278,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 pinned_nodes: vec![],
             })?;
             return Ok(Self {
-                mem,
+                mem: Arc::new(mem),
                 pruned_to_pos: Position::new(0),
                 journal,
                 metadata,
@@ -402,7 +407,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
 
         Ok(Self {
-            mem,
+            mem: Arc::new(mem),
             pruned_to_pos: effective_prune_pos,
             journal,
             metadata,
@@ -520,7 +525,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         journal.prune(*prune_pos).await?;
 
         Ok(Self {
-            mem,
+            mem: Arc::new(mem),
             pruned_to_pos: prune_pos,
             journal,
             metadata,
@@ -649,10 +654,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from
         // the mem. We prune to the previously captured leaf count.
-        self.mem
-            .prune(sync_target_leaves)
+        let mem = Arc::make_mut(&mut self.mem);
+        mem.prune(sync_target_leaves)
             .expect("captured leaves is in bounds");
-        self.mem.add_pinned_nodes(pinned_nodes);
+        mem.add_pinned_nodes(pinned_nodes);
 
         Ok(())
     }
@@ -681,7 +686,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let pinned_nodes = self.update_metadata(pos).await?;
 
         self.journal.prune(*pos).await?;
-        self.mem.add_pinned_nodes(pinned_nodes);
+        Arc::make_mut(&mut self.mem).add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
         Ok(())
@@ -770,7 +775,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Already-committed ancestors are skipped automatically.
     /// Applying a batch from a different fork returns [`Error::StaleBatch`].
     pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
-        self.mem.apply_batch(batch)?;
+        Arc::make_mut(&mut self.mem).apply_batch(batch)?;
         Ok(())
     }
 
@@ -785,6 +790,15 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Borrow the committed Mem for the duration of the closure.
     pub fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, D>) -> R) -> R {
         f(&self.mem)
+    }
+
+    /// Return a zero-copy, immutable snapshot of the committed Mem.
+    ///
+    /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
+    /// alive. Use this to move committed node fallback into a job running off the calling task
+    /// (see [`Merkle::mem`]); prefer [`Merkle::with_mem`] when a borrow suffices.
+    pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
+        Arc::clone(&self.mem)
     }
 
     /// Create a new speculative batch with this structure as its parent.
@@ -843,7 +857,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // rebuild from the journal/metadata instead.
         if new_size >= Position::try_from(self.mem.bounds().start).expect("valid mem bounds start")
         {
-            self.mem.truncate(new_size);
+            Arc::make_mut(&mut self.mem).truncate(new_size);
         } else {
             let mut pinned_nodes = Vec::new();
             for pos in F::nodes_to_pin(destination_loc) {
@@ -863,7 +877,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 self.pruned_to_pos,
             )
             .await?;
-            self.mem = mem;
+            self.mem = Arc::new(mem);
         }
 
         Ok(())

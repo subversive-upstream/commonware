@@ -849,7 +849,7 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata, new_commit);
+        let merkleized = batch.merkleize(&db, metadata, new_commit).await;
         db.apply_batch(merkleized).await.unwrap();
         db
     }
@@ -1197,7 +1197,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .append(vec![1, 2, 3])
                 .append(vec![4, 5, 6])
-                .merkleize(&source, Some(metadata.clone()), floor);
+                .merkleize(&source, Some(metadata.clone()), floor)
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -1246,11 +1247,11 @@ mod compact_variable_mmr {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch = source.new_batch().append(vec![7, 8, 9]).merkleize(
-                &source,
-                Some(vec![1]),
-                Location::new(1),
-            );
+            let batch = source
+                .new_batch()
+                .append(vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -1299,11 +1300,11 @@ mod compact_variable_mmr {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch = source.new_batch().append(vec![7, 8, 9]).merkleize(
-                &source,
-                Some(vec![1]),
-                Location::new(1),
-            );
+            let batch = source
+                .new_batch()
+                .append(vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -1370,7 +1371,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .append(vec![1, 2, 3])
                 .append(vec![4, 5, 6])
-                .merkleize(&source, Some(vec![7]), Location::new(2));
+                .merkleize(&source, Some(vec![7]), Location::new(2))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -1427,11 +1429,11 @@ mod compact_variable_mmr {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch = source.new_batch().append(vec![7, 8, 9]).merkleize(
-                &source,
-                Some(vec![1]),
-                Location::new(1),
-            );
+            let batch = source
+                .new_batch()
+                .append(vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -1484,7 +1486,8 @@ mod compact_variable_mmr {
                 .new_batch()
                 .append(vec![1, 2, 3])
                 .append(vec![4, 5, 6])
-                .merkleize(&source, Some(vec![7]), Location::new(2));
+                .merkleize(&source, Some(vec![7]), Location::new(2))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -1554,11 +1557,11 @@ mod compact_variable_mmr {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch1 = source.new_batch().append(vec![1, 2, 3]).merkleize(
-                &source,
-                Some(vec![1]),
-                Location::new(1),
-            );
+            let batch1 = source
+                .new_batch()
+                .append(vec![1, 2, 3])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
             source.apply_batch(batch1).await.unwrap();
             source.commit().await.unwrap();
             let stale_target = sync::compact::Target {
@@ -1566,11 +1569,11 @@ mod compact_variable_mmr {
                 leaf_count: source.bounds().end,
             };
 
-            let batch2 = source.new_batch().append(vec![4, 5, 6]).merkleize(
-                &source,
-                Some(vec![2]),
-                Location::new(2),
-            );
+            let batch2 = source
+                .new_batch()
+                .append(vec![4, 5, 6])
+                .merkleize(&source, Some(vec![2]), Location::new(2))
+                .await;
             source.apply_batch(batch2).await.unwrap();
             source.commit().await.unwrap();
             let current_target = sync::compact::Target {
@@ -1604,11 +1607,11 @@ mod compact_variable_mmr {
 
             let metadata1 = vec![1, 1, 1];
             let floor1 = Location::new(1);
-            let batch1 = source.new_batch().append(vec![10, 11]).merkleize(
-                &source,
-                Some(metadata1.clone()),
-                floor1,
-            );
+            let batch1 = source
+                .new_batch()
+                .append(vec![10, 11])
+                .merkleize(&source, Some(metadata1.clone()), floor1)
+                .await;
             source.apply_batch(batch1).unwrap();
             source.sync().await.unwrap();
             let target1 = source.target();
@@ -1641,11 +1644,11 @@ mod compact_variable_mmr {
                 .unwrap();
             let metadata2 = vec![2, 2, 2];
             let floor2 = Location::new(2);
-            let batch2 = source.new_batch().append(vec![20, 21]).merkleize(
-                &source,
-                Some(metadata2.clone()),
-                floor2,
-            );
+            let batch2 = source
+                .new_batch()
+                .append(vec![20, 21])
+                .merkleize(&source, Some(metadata2.clone()), floor2)
+                .await;
             source.apply_batch(batch2).unwrap();
             source.sync().await.unwrap();
             let target2 = source.target();
@@ -1677,11 +1680,11 @@ mod compact_variable_mmr {
             assert_eq!(source.target(), target1);
             let metadata3 = vec![3, 3, 3];
             let floor3 = Location::new(2);
-            let batch3 = source.new_batch().append(vec![30, 31, 32]).merkleize(
-                &source,
-                Some(metadata3.clone()),
-                floor3,
-            );
+            let batch3 = source
+                .new_batch()
+                .append(vec![30, 31, 32])
+                .merkleize(&source, Some(metadata3.clone()), floor3)
+                .await;
             source.apply_batch(batch3).unwrap();
             source.sync().await.unwrap();
             let target3 = source.target();
@@ -1749,11 +1752,11 @@ mod compact_variable_mmr {
             let mut first_size = None;
             for i in 1u8..=3 {
                 let floor = seeded.inactivity_floor_loc();
-                let batch =
-                    seeded
-                        .new_batch()
-                        .append(vec![i])
-                        .merkleize(&seeded, Some(vec![i]), floor);
+                let batch = seeded
+                    .new_batch()
+                    .append(vec![i])
+                    .merkleize(&seeded, Some(vec![i]), floor)
+                    .await;
                 seeded.apply_batch(batch).unwrap();
                 seeded.sync().await.unwrap();
                 first_size.get_or_insert(seeded.size());
@@ -1774,11 +1777,11 @@ mod compact_variable_mmr {
                     .await
                     .unwrap();
             let metadata = vec![9, 9, 9];
-            let batch = source.new_batch().append(vec![1, 2, 3]).merkleize(
-                &source,
-                Some(metadata.clone()),
-                Location::new(0),
-            );
+            let batch = source
+                .new_batch()
+                .append(vec![1, 2, 3])
+                .merkleize(&source, Some(metadata.clone()), Location::new(0))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
             let bounds = source.bounds();
@@ -1821,11 +1824,11 @@ mod compact_variable_mmr {
             let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
                 .await
                 .unwrap();
-            let batch = seeded.new_batch().append(vec![1]).merkleize(
-                &seeded,
-                Some(vec![1]),
-                Location::new(0),
-            );
+            let batch = seeded
+                .new_batch()
+                .append(vec![1])
+                .merkleize(&seeded, Some(vec![1]), Location::new(0))
+                .await;
             seeded.apply_batch(batch).unwrap();
             seeded.sync().await.unwrap();
             let target_a = seeded.target();
@@ -1837,11 +1840,11 @@ mod compact_variable_mmr {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch = source.new_batch().append(vec![9]).merkleize(
-                &source,
-                Some(vec![9]),
-                Location::new(0),
-            );
+            let batch = source
+                .new_batch()
+                .append(vec![9])
+                .merkleize(&source, Some(vec![9]), Location::new(0))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
             let bounds = source.bounds();
@@ -2004,7 +2007,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .append(vec![1, 2, 3])
                 .append(vec![4, 5, 6])
-                .merkleize(&source, Some(metadata.clone()), floor);
+                .merkleize(&source, Some(metadata.clone()), floor)
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -2053,11 +2057,11 @@ mod compact_variable_mmb {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch = source.new_batch().append(vec![7, 8, 9]).merkleize(
-                &source,
-                Some(vec![1]),
-                Location::new(1),
-            );
+            let batch = source
+                .new_batch()
+                .append(vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -2106,11 +2110,11 @@ mod compact_variable_mmb {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch = source.new_batch().append(vec![7, 8, 9]).merkleize(
-                &source,
-                Some(vec![1]),
-                Location::new(1),
-            );
+            let batch = source
+                .new_batch()
+                .append(vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -2177,7 +2181,8 @@ mod compact_variable_mmb {
                 .new_batch()
                 .append(vec![1, 2, 3])
                 .append(vec![4, 5, 6])
-                .merkleize(&source, Some(vec![7]), Location::new(2));
+                .merkleize(&source, Some(vec![7]), Location::new(2))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -2234,11 +2239,11 @@ mod compact_variable_mmb {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch = source.new_batch().append(vec![7, 8, 9]).merkleize(
-                &source,
-                Some(vec![1]),
-                Location::new(1),
-            );
+            let batch = source
+                .new_batch()
+                .append(vec![7, 8, 9])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
             source.apply_batch(batch).await.unwrap();
             source.commit().await.unwrap();
 
@@ -2287,11 +2292,11 @@ mod compact_variable_mmb {
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
                     .await
                     .unwrap();
-            let batch1 = source.new_batch().append(vec![1, 2, 3]).merkleize(
-                &source,
-                Some(vec![1]),
-                Location::new(1),
-            );
+            let batch1 = source
+                .new_batch()
+                .append(vec![1, 2, 3])
+                .merkleize(&source, Some(vec![1]), Location::new(1))
+                .await;
             source.apply_batch(batch1).await.unwrap();
             source.commit().await.unwrap();
             let stale_target = sync::compact::Target {
@@ -2299,11 +2304,11 @@ mod compact_variable_mmb {
                 leaf_count: source.bounds().end,
             };
 
-            let batch2 = source.new_batch().append(vec![4, 5, 6]).merkleize(
-                &source,
-                Some(vec![2]),
-                Location::new(2),
-            );
+            let batch2 = source
+                .new_batch()
+                .append(vec![4, 5, 6])
+                .merkleize(&source, Some(vec![2]), Location::new(2))
+                .await;
             source.apply_batch(batch2).await.unwrap();
             source.commit().await.unwrap();
             let current_target = sync::compact::Target {
@@ -2337,11 +2342,11 @@ mod compact_variable_mmb {
 
             let metadata1 = vec![1, 1, 1];
             let floor1 = Location::new(1);
-            let batch1 = source.new_batch().append(vec![10, 11]).merkleize(
-                &source,
-                Some(metadata1.clone()),
-                floor1,
-            );
+            let batch1 = source
+                .new_batch()
+                .append(vec![10, 11])
+                .merkleize(&source, Some(metadata1.clone()), floor1)
+                .await;
             source.apply_batch(batch1).unwrap();
             source.sync().await.unwrap();
             let target1 = source.target();
@@ -2374,11 +2379,11 @@ mod compact_variable_mmb {
                 .unwrap();
             let metadata2 = vec![2, 2, 2];
             let floor2 = Location::new(2);
-            let batch2 = source.new_batch().append(vec![20, 21]).merkleize(
-                &source,
-                Some(metadata2.clone()),
-                floor2,
-            );
+            let batch2 = source
+                .new_batch()
+                .append(vec![20, 21])
+                .merkleize(&source, Some(metadata2.clone()), floor2)
+                .await;
             source.apply_batch(batch2).unwrap();
             source.sync().await.unwrap();
             let target2 = source.target();
@@ -2410,11 +2415,11 @@ mod compact_variable_mmb {
             assert_eq!(source.target(), target1);
             let metadata3 = vec![3, 3, 3];
             let floor3 = Location::new(2);
-            let batch3 = source.new_batch().append(vec![30, 31, 32]).merkleize(
-                &source,
-                Some(metadata3.clone()),
-                floor3,
-            );
+            let batch3 = source
+                .new_batch()
+                .append(vec![30, 31, 32])
+                .merkleize(&source, Some(metadata3.clone()), floor3)
+                .await;
             source.apply_batch(batch3).unwrap();
             source.sync().await.unwrap();
             let target3 = source.target();

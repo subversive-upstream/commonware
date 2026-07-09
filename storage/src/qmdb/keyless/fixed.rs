@@ -74,7 +74,7 @@ mod test {
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner as _,
-        Supervisor as _,
+        Supervisor as _, ThreadPooler as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -122,7 +122,8 @@ mod test {
     }
 
     async fn open_rayon_db<F: Family>(context: deterministic::Context) -> TestRayonDb<F> {
-        let cfg = db_config("rayon", &context, Rayon::new(NZUsize!(2)).unwrap());
+        let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+        let cfg = db_config("rayon", &context, strategy);
         TestRayonDb::init(context, cfg).await.unwrap()
     }
 
@@ -157,7 +158,8 @@ mod test {
             let batch = db
                 .new_batch()
                 .append(value.clone())
-                .merkleize(&db, None, floor);
+                .merkleize(&db, None, floor)
+                .await;
             let range = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(range.start).await.unwrap(), Some(value.clone()));
             assert_eq!(
@@ -318,12 +320,14 @@ mod test {
             .new_batch()
             .append(v1.clone())
             .append(v2.clone())
-            .merkleize(&db, Some(metadata.clone()), floor);
-        let compact_batch = compact.new_batch().append(v1).append(v2).merkleize(
-            &compact,
-            Some(metadata.clone()),
-            floor,
-        );
+            .merkleize(&db, Some(metadata.clone()), floor)
+            .await;
+        let compact_batch = compact
+            .new_batch()
+            .append(v1)
+            .append(v2)
+            .merkleize(&compact, Some(metadata.clone()), floor)
+            .await;
 
         assert_eq!(retained.root(), compact_batch.root());
 
@@ -965,7 +969,7 @@ mod test {
                 batch = batch.append(U64::new(i * 10 + 1));
             }
             let floor = target_db.inactivity_floor_loc();
-            let merkleized = batch.merkleize(&target_db, None, floor);
+            let merkleized = batch.merkleize(&target_db, None, floor).await;
             target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();
