@@ -311,8 +311,10 @@
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
 //! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
 //! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
-//! Before sending a message, the `Journal` sync is invoked to prevent inadvertent Byzantine behavior
-//! on restart (especially in the case of unclean shutdown).
+//! Before sending a message, any pending `Journal` appends are synced to prevent inadvertent Byzantine
+//! behavior on restart (especially in the case of unclean shutdown). All appends made in the same event
+//! loop iteration are coalesced into a single sync that runs after messages are constructed and before
+//! any are broadcast (even if there is nothing to broadcast).
 //!
 //! ## Automaton Failure Semantics
 //!
@@ -331,9 +333,9 @@
 //! Returning `false` from `verify` means the proposal is permanently invalid and causes a local
 //! nullify. Returning `false` from `certify` means the notarized payload is permanently
 //! uncertifiable for that round and also causes a local nullify. Closing `certify` does not provide
-//! a fast-skip signal and can halt progress because certification requests are not retried. The safe
-//! way to stop working on certification is to keep the request pending until Simplex drops it after
-//! finalizing the block or a descendant.
+//! a fast-skip signal and can halt progress because certification requests are not retried during
+//! the same run. The safe way to stop working on certification is to keep the request pending until
+//! Simplex drops it after finalizing the block or a descendant.
 
 pub mod elector;
 pub mod scheme;
