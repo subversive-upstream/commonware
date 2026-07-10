@@ -453,10 +453,10 @@ mod tests {
         utils::mocks::inert_channel,
         Manager as _, Recipients, Sender as _, TrackedPeers,
     };
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
-        IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
+        IoBuf, Metrics as _, Quota, Runner, Spawner, Strategizer as _, Supervisor as _,
     };
     use commonware_utils::{
         ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, TestRng, NZU16,
@@ -495,24 +495,32 @@ mod tests {
     //
     // Supported forms:
     //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture)
+    //   test_for_all_fixtures!(callee, arg);             // callee::<_, _, Elector, _>(fixture, arg)
+    //   test_for_all_fixtures!(callee, arg, level = "INFO"); // arg with a trace-level override
     //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture)
     //   test_for_all_fixtures!(callee, level = "INFO");  // overrides the trace level
     macro_rules! test_for_all_fixtures {
         ($callee:ident) => {
-            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee));
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [] []));
         };
         ($callee:ident, level = $level:literal) => {
-            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee));
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee [] []));
         };
         ($callee:ident, seeds = $n:expr) => {
             for_each_fixture!(test_for_all_fixtures!(@seeded $n, $callee));
         };
-        (@emit [$traced:meta] $callee:ident, $suffix:ident, $elector:ty, $fixture:expr) => {
+        ($callee:ident, $arg:expr, level = $level:literal) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced($level)] $callee [, _] [, $arg]));
+        };
+        ($callee:ident, $arg:expr) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit [test_traced] $callee [, _] [, $arg]));
+        };
+        (@emit [$traced:meta] $callee:ident [$($generics:tt)*] [$($args:tt)*], $suffix:ident, $elector:ty, $fixture:expr) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[$traced]
                 fn [<test_ $callee _ $suffix>]() {
-                    $callee::<_, _, $elector>($fixture);
+                    $callee::<_, _, $elector $($generics)*>($fixture $($args)*);
                 }
             }
         };
@@ -792,11 +800,14 @@ mod tests {
             .count() as u32
     }
 
-    fn all_online<S, F, L>(mut fixture: F)
-    where
+    fn all_online<S, F, L, T>(
+        mut fixture: F,
+        strategy: impl FnOnce(&mut deterministic::Context) -> T + Send + 'static,
+    ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: Elector<S>,
+        T: Strategy,
     {
         // Create context
         let n = 5;
@@ -813,6 +824,7 @@ mod tests {
                 schemes,
                 ..
             } = fixture(&mut context, &namespace, n);
+            let strategy = strategy(&mut context);
             let mut oracle =
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
@@ -868,7 +880,7 @@ mod tests {
                     automaton: application.clone(),
                     relay: application.clone(),
                     reporter: reporter.clone(),
-                    strategy: Sequential,
+                    strategy: strategy.clone(),
                     partition: validator.to_string(),
                     mailbox_size: NZUsize!(1024),
                     epoch: Epoch::new(333),
@@ -1024,7 +1036,15 @@ mod tests {
         });
     }
 
-    test_for_all_fixtures!(all_online);
+    test_for_all_fixtures!(all_online, |_| Sequential);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_all_online_rayon_bls12381_threshold_vrf_min_pk() {
+        all_online::<_, _, Random, _>(bls12381_threshold_vrf::fixture::<MinPk, _>, |context| {
+            context.strategy(NZUsize!(2))
+        });
+    }
 
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(mut fixture: F)
     where
