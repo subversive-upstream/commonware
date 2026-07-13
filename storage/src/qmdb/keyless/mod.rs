@@ -49,7 +49,9 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
-    qmdb::{any::value::ValueEncoding, batch_chain, metrics::Metrics, Error},
+    qmdb::{
+        any::value::ValueEncoding, batch_chain, metrics::Metrics, single_operation_root, Error,
+    },
     Context,
 };
 use commonware_codec::EncodeShared;
@@ -70,6 +72,19 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
+
+/// Compute the authenticated root of a newly initialized database without opening storage.
+///
+/// The initial commit never carries metadata, so this root always represents `Commit(None, 0)`.
+pub fn initial_root<F, V, H>() -> H::Digest
+where
+    F: Family,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, V>: EncodeShared,
+{
+    single_operation_root::<F, H>(&Operation::<F, V>::Commit(None, Location::new(0)))
+}
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
