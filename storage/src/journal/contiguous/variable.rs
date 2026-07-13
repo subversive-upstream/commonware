@@ -1150,14 +1150,19 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let items_per_blob = cfg.items_per_section.get();
         let data_partition = cfg.data_partition();
         let data_context = context.child("data");
+        let offsets_partition = cfg.offsets_partition();
+        let offsets_context = context.child("offsets");
+
+        // Fail before writing intent if the offsets blob partitions are already inconsistent.
+        Partition::select(&offsets_context, &offsets_partition).await?;
 
         // `init_at_size_cleared` durably stages the offsets reset, clears the data partition,
         // then completes the reset. A crash at any point leaves a staged clear that the next
         // `init` (via `init_cleared`) finishes, so stale data can never outlive the reset.
         let offsets = fixed::Journal::<E, u64>::init_at_size_cleared(
-            context.child("offsets"),
+            offsets_context,
             fixed::Config {
-                partition: cfg.offsets_partition(),
+                partition: offsets_partition,
                 items_per_blob: cfg.items_per_section,
                 page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
@@ -1791,12 +1796,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             .max(offsets_bounds.start)
             .checked_add(items_in_newest)
             .ok_or(Error::OffsetOverflow)?;
-        let mut data_sync_start =
+        let data_sync_start =
             Self::recovery_anchor(offsets, &offsets_bounds, retained_data_end_bound)?;
 
-        // Rebuild the offsets suffix by replaying data from there. If the data turns out to be
-        // shorter, retry once from the pruning boundary.
-        let mut data_size = Self::rebuild_offsets_from_anchor(
+        // Rebuild the offsets suffix by replaying data from there.
+        let data_size = Self::rebuild_offsets_from_anchor(
             partition,
             pending,
             offsets,
@@ -1806,30 +1810,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             compressed,
         )
         .await?;
-        if data_size.is_none() && data_sync_start != offsets_bounds.start {
-            warn!(
-                anchor = data_sync_start,
-                pruning_boundary = offsets_bounds.start,
-                "crash repair: data blobs shorter than offsets recovery watermark, rebuilding from pruning boundary"
-            );
-            data_sync_start = offsets_bounds.start;
-            data_size = Self::rebuild_offsets_from_anchor(
-                partition,
-                pending,
-                offsets,
-                items_per_blob,
-                data_sync_start,
-                codec_config,
-                compressed,
-            )
-            .await?;
-        }
-        let data_size = data_size.ok_or_else(|| {
-            Error::Corruption(format!(
-                "data blobs shorter than pruning boundary {}",
-                offsets_bounds.start
-            ))
-        })?;
 
         // Final invariant checks. These hold by construction after alignment, but the inputs are
         // recovered from disk, so a violation means corruption rather than a logic bug.
@@ -1914,8 +1894,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(target..target)
     }
 
-    /// Choose the position to rebuild offsets from: the persisted recovery watermark when it is
-    /// usable, otherwise the offsets pruning boundary.
+    /// Choose the position to rebuild offsets from. A watermark below the pruning boundary is
+    /// stale after a prune, while a watermark beyond retained data indicates corruption.
     fn recovery_anchor(
         offsets: &fixed::Journal<E, u64>,
         offsets_bounds: &Range<u64>,
@@ -1930,8 +1910,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 offsets_bounds.end
             )));
         }
-        if recovery_watermark < offsets_bounds.start || recovery_watermark > retained_data_end_bound
-        {
+        if recovery_watermark < offsets_bounds.start {
             warn!(
                 recovery_watermark,
                 start = offsets_bounds.start,
@@ -1940,6 +1919,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 "crash repair: offsets recovery watermark is unusable, rebuilding from offsets start"
             );
             return Ok(offsets_bounds.start);
+        }
+        if recovery_watermark > retained_data_end_bound {
+            return Err(Error::Corruption(format!(
+                "offsets recovery watermark {recovery_watermark} exceeds retained data end \
+                 {retained_data_end_bound} (offsets bounds {}..{})",
+                offsets_bounds.start, offsets_bounds.end
+            )));
         }
         Ok(recovery_watermark)
     }
@@ -1969,9 +1955,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Rebuild the offsets suffix by replaying the data blobs from a recovery anchor.
     ///
-    /// Returns `Ok(None)` if the anchor is ahead of the data and callers should retry from an
-    /// earlier point. If replay finds a short blob after the anchor, recovery truncates newer
-    /// blobs and returns the contiguous data-backed size.
+    /// Returns corruption if the data does not reach the anchor. If replay finds a short blob
+    /// after the anchor, recovery truncates newer blobs and returns the contiguous data-backed
+    /// size.
     async fn rebuild_offsets_from_anchor(
         partition: &Partition<E>,
         pending: &mut BTreeMap<u64, Writer<E::Blob>>,
@@ -1980,15 +1966,27 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         anchor: u64,
         codec_config: &V::Cfg,
         compressed: bool,
-    ) -> Result<Option<u64>, Error> {
+    ) -> Result<u64, Error> {
         assert!(
             !pending.is_empty(),
             "rebuild_offsets called with no data blobs"
         );
 
         let offsets_bounds = offsets.pruning_boundary()..offsets.size();
+        let data_too_short = || {
+            if anchor == offsets_bounds.start {
+                Error::Corruption(format!(
+                    "data blobs shorter than pruning boundary {}",
+                    offsets_bounds.start
+                ))
+            } else {
+                Error::Corruption(format!(
+                    "data blobs shorter than offsets recovery watermark {anchor}"
+                ))
+            }
+        };
         if anchor < offsets_bounds.start || anchor > offsets_bounds.end {
-            return Ok(None);
+            return Err(data_too_short());
         }
 
         if offsets_bounds.end > anchor {
@@ -2009,7 +2007,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let Some(writer) = pending.get_mut(&blob) else {
                 if skip > 0 {
                     // The data ends before the anchor.
-                    return Ok(None);
+                    return Err(data_too_short());
                 }
                 // A missing blob ends the contiguous data-backed prefix: any newer blobs are
                 // unreachable and removed.
@@ -2020,7 +2018,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     );
                     Self::remove_blobs_after(partition, pending, blob).await?;
                 }
-                return Ok(Some(size));
+                return Ok(size);
             };
 
             let replay = writer
@@ -2064,7 +2062,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 // The blob's frames ended here (short blob, or torn junk at capacity).
                 if skip > 0 {
                     // The data ends before the anchor.
-                    return Ok(None);
+                    return Err(data_too_short());
                 }
                 if torn {
                     warn!(
@@ -2081,7 +2079,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     warn!(blob, size, "crash repair: truncating data after short blob");
                     Self::remove_blobs_after(partition, pending, blob).await?;
                 }
-                return Ok(Some(size));
+                return Ok(size);
             }
 
             blob = blob.checked_add(1).ok_or(Error::OffsetOverflow)?;
@@ -4310,7 +4308,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_rebuild_offsets_anchor_outside_bounds_returns_none() {
+    fn test_variable_rebuild_offsets_rejects_anchor_outside_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let offsets_cfg = fixed::Config {
@@ -4346,9 +4344,8 @@ mod tests {
                 &(),
                 false,
             )
-            .await
-            .unwrap();
-            assert!(result.is_none());
+            .await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
 
             drop(pending);
             Partition::<deterministic::Context>::remove_all(
@@ -4362,7 +4359,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_recovery_retries_from_pruning_boundary_when_anchor_too_far() {
+    fn test_variable_recovery_rejects_watermark_beyond_retained_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -4383,9 +4380,8 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            // The offsets watermark is in-bounds, but the data blobs are shorter than that
-            // anchor. Recovery should retry from the pruning boundary and rebuild only the
-            // retained data prefix.
+            // The offsets watermark is in-bounds, but vouches for acknowledged data that no
+            // longer exists.
             journal
                 .test_set_offsets_recovery_watermark(15)
                 .await
@@ -4394,25 +4390,23 @@ mod tests {
             journal.test_sync_data().await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 0..12);
-            assert_eq!(journal.test_offsets_size(), 12);
-            for i in 0..12u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            // Recovery must preserve the evidence and fail consistently on retry.
+            for child in ["second", "retry"] {
+                match Journal::<_, u64>::init(context.child(child), cfg.clone()).await {
+                    Err(Error::Corruption(message)) => assert_eq!(
+                        message,
+                        "offsets recovery watermark 15 exceeds retained data end 12 \
+                         (offsets bounds 0..20)"
+                    ),
+                    Err(error) => panic!("unexpected error: {error}"),
+                    Ok(_) => panic!("missing acknowledged data was accepted"),
+                }
             }
-            assert!(matches!(
-                journal.read(12).await,
-                Err(Error::ItemOutOfRange(12))
-            ));
-
-            journal.destroy().await.unwrap();
         });
     }
 
     #[test_traced]
-    fn test_variable_recovery_retries_from_pruning_boundary_after_short_middle_blob() {
+    fn test_variable_recovery_rejects_missing_data_below_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -4445,31 +4439,26 @@ mod tests {
             journal.test_sync_data().await.unwrap();
             drop(journal);
 
-            // The first rebuild from watermark 15 starts in blob 1 and tries to skip five items,
-            // but blob 1 contains only positions 10 and 11 before replay jumps to blob 2.
-            // That should return Ok(None), retry from the pruning boundary, and then truncate the
-            // orphaned blob 2.
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 0..12);
-            assert_eq!(journal.test_offsets_size(), 12);
-            for i in 0..12u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            // Rebuilding from watermark 15 cannot skip five items in blob 1 because only
+            // positions 10 and 11 survive. Recovery must fail without deleting the orphaned
+            // blob 2, and the same evidence must remain visible on retry.
+            for child in ["second", "retry"] {
+                match Journal::<_, u64>::init(context.child(child), cfg.clone()).await {
+                    Err(Error::Corruption(message)) => assert_eq!(
+                        message,
+                        "data blobs shorter than offsets recovery watermark 15"
+                    ),
+                    Err(error) => panic!("unexpected error: {error}"),
+                    Ok(_) => panic!("missing acknowledged data was accepted"),
+                }
             }
-            assert!(matches!(
-                journal.read(12).await,
-                Err(Error::ItemOutOfRange(12))
-            ));
 
             let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
             assert_eq!(
                 data_blobs.len(),
-                2,
-                "orphaned blob 2 should be truncated away"
+                3,
+                "corruption evidence should not be removed"
             );
-
-            journal.destroy().await.unwrap();
         });
     }
 
@@ -4516,7 +4505,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_recovery_boundary_data_rewind_rebuilds_offsets() {
+    fn test_variable_recovery_rejects_synced_data_rewind_to_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -4541,20 +4530,19 @@ mod tests {
             journal.test_sync_data().await.unwrap();
             drop(journal);
 
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds(), 0..10);
-            assert_eq!(journal.test_offsets_size(), 10);
-            for i in 0..10u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            // The watermark proves positions through 20 were acknowledged. Losing the second
+            // blob is corruption, including when the surviving data ends exactly at a boundary.
+            for child in ["second", "retry"] {
+                match Journal::<_, u64>::init(context.child(child), cfg.clone()).await {
+                    Err(Error::Corruption(message)) => assert_eq!(
+                        message,
+                        "offsets recovery watermark 20 exceeds retained data end 10 \
+                         (offsets bounds 0..20)"
+                    ),
+                    Err(error) => panic!("unexpected error: {error}"),
+                    Ok(_) => panic!("missing acknowledged data was accepted"),
+                }
             }
-            assert!(matches!(
-                journal.read(10).await,
-                Err(Error::ItemOutOfRange(10))
-            ));
-
-            journal.destroy().await.unwrap();
         });
     }
 
@@ -4904,6 +4892,36 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_init_at_size_rejects_conflicting_offsets_partitions() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-at-size-conflicting-offsets".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let legacy_partition = cfg.offsets_partition();
+            let blobs_partition = format!("{legacy_partition}-blobs");
+
+            for partition in [&legacy_partition, &blobs_partition] {
+                let (blob, _) = context.open(partition, &0u64.to_be_bytes()).await.unwrap();
+                blob.write_at_sync(0, vec![0]).await.unwrap();
+            }
+
+            let result = Journal::<_, u64>::init_at_size(context.child("storage"), cfg, 7).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+
+            // The consistency check must fail before staging a reset, which would erase the
+            // conflicting partitions and their corruption evidence.
+            assert_eq!(context.scan(&legacy_partition).await.unwrap().len(), 1);
+            assert_eq!(context.scan(&blobs_partition).await.unwrap().len(), 1);
         });
     }
 
