@@ -389,8 +389,9 @@ impl<C> Config<C> {
 /// temporarily diverge during crashes. Divergences are automatically aligned during init():
 /// * If offsets are behind data after the recovery watermark: rebuild missing offsets by replaying
 ///   data from the recovery anchor.
-/// * If offsets are ahead of the retained data prefix: rewind offsets to match the data-backed
-///   size.
+/// * If offsets are ahead of the retained data prefix but the data still reaches the recovery
+///   watermark: rewind offsets to match the data-backed size. Retained data ending before the
+///   watermark is corruption because acknowledged data is missing.
 /// * If offsets.bounds().start < the oldest data blob's start: prune offsets to match (this can
 ///   happen if we crash after pruning the data blobs but before pruning the offsets journal).
 ///
@@ -400,12 +401,14 @@ impl<C> Config<C> {
 ///
 /// ## 2. Offsets Recovery Watermark
 ///
-/// The offsets journal's recovery watermark records a preferred point for replaying data to
-/// rebuild offset entries after a crash. Fixed-journal recovery rejects watermarks beyond the
-/// recovered offsets size as corruption. If the watermark is otherwise unusable, such as being
-/// below the recovered offsets start or beyond the retained data prefix, init falls back to the
-/// offsets start. Replay after the anchor stops at the first short data blob and truncates newer
-/// blobs so the recovered journal remains a contiguous prefix.
+/// The offsets journal's recovery watermark records a durable lower bound on the journal size and
+/// a preferred point for replaying data to rebuild offset entries after a crash. Fixed-journal
+/// recovery rejects watermarks beyond the recovered offsets size as corruption. A watermark below
+/// the recovered offsets start is stale after a prune, so init falls back to the offsets start. If
+/// retained data exists but ends before the watermark, init returns corruption because acknowledged
+/// data is missing. If no retained data exists, init reconciles both sides to an empty journal.
+/// Replay after a valid anchor stops at the first short data blob and truncates newer blobs so the
+/// recovered journal remains a contiguous prefix.
 pub struct Journal<E: Context, V: Codec> {
     /// The data blobs: sealed history plus the writable tail.
     blobs: Writable<E>,
@@ -419,6 +422,11 @@ pub struct Journal<E: Context, V: Codec> {
 
     /// Earliest data blob modified since the last `commit()` or `sync()`.
     dirty_from_blob: Option<u64>,
+
+    /// Test-only: park [Self::prune] after the data-blob removal, before the offsets prune,
+    /// so tests can drop the pending future at that exact point.
+    #[cfg(test)]
+    halt_before_offsets_prune: bool,
 
     /// The number of items per blob.
     ///
@@ -1130,6 +1138,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets,
             bounds,
             dirty_from_blob: None,
+            #[cfg(test)]
+            halt_before_offsets_prune: false,
             items_per_blob: cfg.items_per_section,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
@@ -1193,6 +1203,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets,
             bounds: size..size,
             dirty_from_blob: None,
+            #[cfg(test)]
+            halt_before_offsets_prune: false,
             items_per_blob: cfg.items_per_section,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
@@ -1569,15 +1581,32 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         let new_boundary = blob_first_position(min_blob, items_per_blob)?;
 
-        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
-        // pruning offsets to match.
+        // Make all dirty blobs durable before removing any: the prune target may be
+        // justified by an appended-but-unflushed item (e.g. a consumer's commit record), and
+        // removals are durable, so pruning without this barrier could leave a recovered
+        // journal whose surviving items no longer justify its boundary. Dirty blobs below the
+        // prune point are flushed too: removal may be interrupted, and recovery truncates at
+        // the first torn item, so an unsynced survivor below the boundary could discard
+        // every synced blob behind it. Offsets entries for retained items must survive the
+        // same crash: recovery rebuilds offsets that end behind the surviving data's end by
+        // replaying data, but offsets that end behind its start are unrecoverable because
+        // the data needed to rebuild the missing entries is about to be removed. Data is
+        // flushed first, matching the ordering every other durability path maintains.
+        self.flush_dirty_data().await?;
+        self.dirty_from_blob = None;
+        self.offsets.commit().await?;
+
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
-        self.offsets.prune(new_boundary).await?;
 
-        if let Some(dirty_from) = self.dirty_from_blob {
-            self.dirty_from_blob = Some(dirty_from.max(min_blob));
+        #[cfg(test)]
+        if self.halt_before_offsets_prune {
+            std::future::pending::<()>().await;
         }
+
+        // Prune data before offsets so a crash leaves offsets behind, which init repairs by
+        // pruning offsets to match.
+        self.offsets.prune(new_boundary).await?;
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
@@ -3429,6 +3458,60 @@ mod tests {
             assert_eq!(variable.read(39).await.unwrap(), 3900);
 
             variable.destroy().await.unwrap();
+        });
+    }
+
+    /// A crash after data pruning but before offsets pruning must remain recoverable even when
+    /// the last durable offsets end is below the new data boundary.
+    #[test_traced]
+    fn test_variable_recovery_prune_crash_offsets_end_behind() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-prune-offsets-end-behind".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Persist offsets only through position 7, then append enough unsynced items for a
+            // prune to advance the data boundary beyond that durable offsets end.
+            for i in 0..7u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            for i in 7..12u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+
+            // Drop the production prune future while it is parked after the data-blob
+            // removal, before offsets.prune has made the appended offsets durable: a
+            // genuine cancellation at that await.
+            journal.halt_before_offsets_prune = true;
+            {
+                let fut = journal.prune(10);
+                futures::pin_mut!(fut);
+                assert!(
+                    futures::poll!(fut.as_mut()).is_pending(),
+                    "prune must park before offsets.prune"
+                );
+            }
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("prune crash must leave a recoverable journal");
+            assert_eq!(journal.bounds(), 10..12);
+            for i in 10..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            journal.destroy().await.unwrap();
         });
     }
 
