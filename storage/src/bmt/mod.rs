@@ -142,17 +142,29 @@ impl<D: Digest> Tree<D> {
         let mut current_level = levels.last();
         while !current_level.is_singleton() {
             let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
-            for chunk in current_level.chunks(2) {
-                // If no right child exists, duplicate left child.
-                let right = if chunk.len() == 2 {
-                    &chunk[1]
-                } else {
-                    &chunk[0]
-                };
 
-                // Compute the parent digest
-                let digest = H::hash(&[chunk[0].as_ref(), right.as_ref()]);
-                next_level.push(digest);
+            // Process four nodes (two sibling pairs) at a time, duplicating an unpaired
+            // trailing node. Hashing both pairs together lets the underlying hasher
+            // interleave independent messages (see `Hasher::hash_pair`). A trailing
+            // group with a single pair falls back to a single hash.
+            for group in current_level.chunks(4) {
+                match group {
+                    [a, b, c, d] => {
+                        let (left, right) =
+                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), d.as_ref()]);
+                        next_level.push(left);
+                        next_level.push(right);
+                    }
+                    [a, b, c] => {
+                        let (left, right) =
+                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), c.as_ref()]);
+                        next_level.push(left);
+                        next_level.push(right);
+                    }
+                    [a, b] => next_level.push(H::hash(&[a.as_ref(), b.as_ref()])),
+                    [a] => next_level.push(H::hash(&[a.as_ref(), a.as_ref()])),
+                    _ => unreachable!("chunks(4) yields at most 4 elements"),
+                }
             }
 
             // Add the computed level to the tree
@@ -487,15 +499,15 @@ impl<D: Digest> Proof<D> {
 
             let (left_node, right_node) = if is_last_odd {
                 // Node is duplicated - no sibling consumed from proof
-                (&computed, &computed)
+                (computed, computed)
             } else if position.is_multiple_of(2) {
                 // Even position: sibling is to the right
-                let sibling = sibling_iter.next().ok_or(Error::UnalignedProof)?;
-                (&computed, sibling)
+                let sibling = *sibling_iter.next().ok_or(Error::UnalignedProof)?;
+                (computed, sibling)
             } else {
                 // Odd position: sibling is to the left
-                let sibling = sibling_iter.next().ok_or(Error::UnalignedProof)?;
-                (sibling, &computed)
+                let sibling = *sibling_iter.next().ok_or(Error::UnalignedProof)?;
+                (sibling, computed)
             };
 
             // Compute the parent digest
@@ -551,11 +563,24 @@ impl<D: Digest> Proof<D> {
         }
 
         // 1. Sort elements by position and check for duplicates/bounds
-        let mut sorted: Vec<(u32, D)> = Vec::with_capacity(elements.len());
-        for (leaf, position) in elements {
+        for (_, position) in elements {
             if *position >= self.leaf_count {
                 return Err(Error::InvalidPosition(*position));
             }
+        }
+        let mut sorted: Vec<(u32, D)> = Vec::with_capacity(elements.len());
+        let mut leaf_chunks = elements.chunks_exact(2);
+        for chunk in &mut leaf_chunks {
+            let (leaf_a, pos_a) = &chunk[0];
+            let (leaf_b, pos_b) = &chunk[1];
+            let (digest_a, digest_b) = H::hash_pair(
+                &[&pos_a.to_be_bytes(), leaf_a.as_ref()],
+                &[&pos_b.to_be_bytes(), leaf_b.as_ref()],
+            );
+            sorted.push((*pos_a, digest_a));
+            sorted.push((*pos_b, digest_b));
+        }
+        for (leaf, position) in leaf_chunks.remainder() {
             let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
             sorted.push((*position, digest));
         }
@@ -575,8 +600,11 @@ impl<D: Digest> Proof<D> {
         let mut sibling_iter = self.siblings.iter();
         let mut current = sorted;
         let mut next_level: Vec<(u32, D)> = Vec::with_capacity(current.len());
+        let mut parents: Vec<(u32, D, D)> = Vec::with_capacity(current.len());
 
         for _ in 0..levels - 1 {
+            // First pass: determine each parent's (left, right) children without hashing, so
+            // independent parent digests can be batched together in the second pass.
             let mut idx = 0;
             while idx < current.len() {
                 let (pos, digest) = current[idx];
@@ -607,12 +635,26 @@ impl<D: Digest> Proof<D> {
                     (left, right)
                 };
 
-                // Hash parent
-                let digest = H::hash(&[left.as_ref(), right.as_ref()]);
-                next_level.push((parent_pos, digest));
-
+                parents.push((parent_pos, left, right));
                 idx += 1;
             }
+
+            // Second pass: hash independent parent digests two at a time via `hash_pair`.
+            let mut parent_chunks = parents.chunks_exact(2);
+            for chunk in &mut parent_chunks {
+                let (pos_a, left_a, right_a) = chunk[0];
+                let (pos_b, left_b, right_b) = chunk[1];
+                let (digest_a, digest_b) = H::hash_pair(
+                    &[left_a.as_ref(), right_a.as_ref()],
+                    &[left_b.as_ref(), right_b.as_ref()],
+                );
+                next_level.push((pos_a, digest_a));
+                next_level.push((pos_b, digest_b));
+            }
+            for &(pos, left, right) in parent_chunks.remainder() {
+                next_level.push((pos, H::hash(&[left.as_ref(), right.as_ref()])));
+            }
+            parents.clear();
 
             // Prepare for next level
             core::mem::swap(&mut current, &mut next_level);

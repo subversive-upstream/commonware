@@ -36,6 +36,9 @@ use rand_core::CryptoRng;
 use sha2::{Digest as _, Sha256 as ISha256, block_api::compress256};
 use zeroize::Zeroize;
 
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+mod simd;
+
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
 pub type CoreSha256 = ISha256;
 
@@ -180,6 +183,15 @@ impl Hasher for Sha256 {
     }
 
     #[inline]
+    fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        if let Some(pair) = simd::hash_pair(left, right) {
+            return pair;
+        }
+        (Self::hash(left), Self::hash(right))
+    }
+
+    #[inline]
     fn update(&mut self, message: &[u8]) -> &mut Self {
         self.hasher.update(message);
         self
@@ -284,19 +296,15 @@ mod tests {
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     );
 
+    /// Anchor the streaming and one-shot paths to a known SHA-256 digest,
+    /// which the differential fuzz tests (comparing paths against each
+    /// other) cannot do.
     #[test]
     fn test_sha256() {
         let msg = b"hello world";
 
-        // Generate initial hash
+        // Generate hash via streaming
         let mut hasher = Sha256::default();
-        hasher.update(msg);
-        let (hasher, digest) = hasher.finalize();
-        assert!(Digest::decode(digest.as_ref()).is_ok());
-        assert_eq!(digest.as_ref(), HELLO_DIGEST);
-
-        // Reuse the reset hasher
-        let mut hasher = hasher;
         hasher.update(msg);
         let (_, digest) = hasher.finalize();
         assert!(Digest::decode(digest.as_ref()).is_ok());
@@ -311,8 +319,10 @@ mod tests {
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
-    /// Exercise the fixed-size fast path and the streaming fallback across the
-    /// `MAX_FIXED` boundary, checking each against the streaming implementation.
+    /// Exhaustively sweep every total length across the block-padding and
+    /// `MAX_FIXED` boundaries, checking the one-shot path against the
+    /// streaming implementation. Fuzzing only hits specific off-by-one
+    /// lengths probabilistically, while this sweep guarantees them all.
     #[test]
     fn test_sha256_hash_parts_boundaries() {
         for total in 0..=300usize {
@@ -359,6 +369,32 @@ mod tests {
     #[test]
     fn test_sha256_len() {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
+    }
+
+    /// Deterministically exercise the pair (assembly) kernel with the MMR
+    /// node shape (position || left || right) that motivates it, regardless
+    /// of what the fuzz generators happen to sample.
+    #[test]
+    fn test_hash_pair_mmr_node_shape_matches_streaming() {
+        fn node(position: u64, fill: u8) -> Vec<Vec<u8>> {
+            vec![
+                position.to_be_bytes().to_vec(),
+                vec![fill; 32],
+                vec![fill + 1; 32],
+            ]
+        }
+        crate::fuzz::Plan::<Sha256>::new(node(42, 0x11), node(43, 0x33)).run();
+    }
+
+    /// Deterministically exercise the pair (assembly) kernel with the BMT
+    /// node shape (left || right, no position) that motivates it, regardless
+    /// of what the fuzz generators happen to sample.
+    #[test]
+    fn test_hash_pair_bmt_node_shape_matches_streaming() {
+        fn node(fill: u8) -> Vec<Vec<u8>> {
+            vec![vec![fill; 32], vec![fill + 1; 32]]
+        }
+        crate::fuzz::Plan::<Sha256>::new(node(0x11), node(0x33)).run();
     }
 
     #[test]

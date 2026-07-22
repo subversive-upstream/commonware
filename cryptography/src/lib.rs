@@ -47,6 +47,9 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod bloomfilter;
     pub use crate::bloomfilter::BloomFilter;
 
+    #[cfg(any(test, feature = "fuzz"))]
+    pub mod fuzz;
+
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
@@ -263,6 +266,12 @@ commonware_macros::stability_scope!(BETA {
         /// small, fixed-shape inputs (e.g. hashing a pair of digests) to avoid
         /// the overhead of the streaming machinery.
         fn hash(parts: &[&[u8]]) -> Self::Digest;
+
+        /// Hash two messages, each given as a concatenation of parts, in a
+        /// single shot.
+        ///
+        /// Must be equivalent to hashing each message with [`Hasher::hash`].
+        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest);
 
         /// Append `bytes` to the hasher's running state.
         fn update(&mut self, bytes: &[u8]) -> &mut Self;
@@ -570,60 +579,8 @@ mod tests {
         assert_ne!(digest, digest_mars);
     }
 
-    fn test_hasher_multiple_updates<H: Hasher>() {
-        // Generate initial hash
-        let mut hasher = H::default();
-        hasher.update(b"hello");
-        hasher.update(b" world");
-        let (_, digest) = hasher.finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
-
-        // Generate hash in oneshot
-        let mut hasher = H::default();
-        hasher.update(b"hello world");
-        let (_, digest_oneshot) = hasher.finalize();
-        assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
-        assert_eq!(digest, digest_oneshot);
-
-        // Generate hash via multi-part one-shot
-        let digest_parts = H::hash(&[b"hello", b" world"]);
-        assert_eq!(digest, digest_parts);
-    }
-
-    fn test_hasher_empty_input<H: Hasher>() {
-        let hasher = H::default();
-        let (_, digest) = hasher.finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
-
-        // The zero-parts one-shot must equal the empty-message digest.
-        assert_eq!(H::hash(&[]), digest);
-    }
-
-    fn test_hasher_large_input<H: Hasher>() {
-        let mut hasher = H::default();
-        let data = vec![1; 1024];
-        hasher.update(&data);
-        let (_, digest) = hasher.finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
-    }
-
     #[test]
     fn test_sha256_hasher_multiple_runs() {
         test_hasher_multiple_runs::<Sha256>();
-    }
-
-    #[test]
-    fn test_sha256_hasher_multiple_updates() {
-        test_hasher_multiple_updates::<Sha256>();
-    }
-
-    #[test]
-    fn test_sha256_hasher_empty_input() {
-        test_hasher_empty_input::<Sha256>();
-    }
-
-    #[test]
-    fn test_sha256_hasher_large_input() {
-        test_hasher_large_input::<Sha256>();
     }
 }
