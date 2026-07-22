@@ -120,7 +120,7 @@ pub(super) fn graft_chunk_digests<H: Hasher, S: Strategy, const N: usize>(
             } else {
                 (
                     chunk_idx,
-                    h.hash([chunk.as_slice(), chunk_ops_digest.as_ref()]),
+                    h.hash(&[chunk.as_slice(), chunk_ops_digest.as_ref()]),
                 )
             }
         },
@@ -235,7 +235,7 @@ impl<F: Graftable, H: HasherTrait<F>> GraftedHasher<F, H> {
 impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
     type Digest = H::Digest;
 
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+    fn hash(&self, parts: &[&[u8]]) -> Self::Digest {
         self.inner.hash(parts)
     }
 
@@ -266,7 +266,6 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
 /// - **Below or above**: standard hash using ops-space positions (`F`).
 /// - **At**: the children form an ops subtree root, which is combined with a bitmap chunk element
 ///   to reconstruct the grafted leaf digest.
-#[derive(Clone)]
 pub struct Verifier<'a, F: Graftable, H: Hasher> {
     hasher: merkle::hasher::Standard<H>,
     grafting_height: u32,
@@ -281,6 +280,19 @@ pub struct Verifier<'a, F: Graftable, H: Hasher> {
     graftable_chunks: u64,
 
     _ops_family: PhantomData<F>,
+}
+
+impl<F: Graftable, H: Hasher> Clone for Verifier<'_, F, H> {
+    fn clone(&self) -> Self {
+        Self {
+            hasher: self.hasher.clone(),
+            grafting_height: self.grafting_height,
+            chunks: self.chunks.clone(),
+            start_chunk_index: self.start_chunk_index,
+            graftable_chunks: self.graftable_chunks,
+            _ops_family: PhantomData,
+        }
+    }
 }
 
 impl<'a, F: Graftable, H: Hasher> Verifier<'a, F, H> {
@@ -310,7 +322,7 @@ impl<'a, F: Graftable, H: Hasher> Verifier<'a, F, H> {
 impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
     type Digest = H::Digest;
 
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+    fn hash(&self, parts: &[&[u8]]) -> H::Digest {
         self.hasher.hash(parts)
     }
 
@@ -359,7 +371,7 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
                 if chunk.iter().all(|&b| b == 0) {
                     ops_subtree_root
                 } else {
-                    self.hash([chunk, ops_subtree_root.as_ref()])
+                    self.hash(&[chunk, ops_subtree_root.as_ref()])
                 }
             }
         }
@@ -662,7 +674,7 @@ mod tests {
                         .get_node(ops_pos)
                         .expect("ops tree missing node at mapped position");
                     batch = batch.add_leaf_digest(
-                        leaf_hasher.hash([chunk.as_ref(), ops_subtree_root.as_ref()]),
+                        leaf_hasher.hash(&[chunk.as_ref(), ops_subtree_root.as_ref()]),
                     );
                 }
                 batch.merkleize(&grafted_mmr, &grafted_hasher)
@@ -834,11 +846,11 @@ mod tests {
             let sub0 = ops_mmr.get_node(pos0).unwrap();
             let batch = grafted
                 .new_batch()
-                .add_leaf_digest(leaf_hasher.hash([c1.as_ref(), sub0.as_ref()]));
+                .add_leaf_digest(leaf_hasher.hash(&[c1.as_ref(), sub0.as_ref()]));
 
             let sub1 = ops_mmr.get_node(pos1).unwrap();
             batch
-                .add_leaf_digest(leaf_hasher.hash([c2.as_ref(), sub1.as_ref()]))
+                .add_leaf_digest(leaf_hasher.hash(&[c2.as_ref(), sub1.as_ref()]))
                 .merkleize(&grafted, &grafted_hasher)
         };
         grafted.apply_batch(&batch).unwrap();

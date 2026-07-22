@@ -8,16 +8,16 @@ use core::marker::PhantomData;
 /// A trait for computing the various digests of a Merkle-family structure.
 ///
 /// The type parameter `F` determines which Merkle family (MMR, MMB, etc.) this hasher targets, and
-/// consequently which `Position` and `Location` types appear in method signatures. Default
-/// implementations are provided for all methods except `hash()`.
+/// consequently which `Position` and `Location` types appear in method signatures.
 pub trait Hasher<F: Family>: Clone + Send + Sync {
+    /// Digest produced by this hasher.
     type Digest: Digest;
 
-    /// Hash an arbitrary sequence of byte slices into a single digest.
+    /// Hash a sequence of byte slices into a single digest.
     ///
     /// The parts are concatenated before hashing (i.e. there is no domain separation between
     /// parts).
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest;
+    fn hash(&self, parts: &[&[u8]]) -> Self::Digest;
 
     /// The bagging policy applied when this hasher folds peaks into a root. Only affects root peak
     /// aggregation; `hash`, `leaf_digest`, and `node_digest` are unaffected.
@@ -30,26 +30,22 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         left: &Self::Digest,
         right: &Self::Digest,
     ) -> Self::Digest {
-        self.hash([
-            (*pos).to_be_bytes().as_slice(),
-            left.as_ref(),
-            right.as_ref(),
-        ])
+        self.hash(&[&(*pos).to_be_bytes(), left, right])
     }
 
     /// Computes the digest for a leaf given its position and the element it represents.
     fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
-        self.hash([(*pos).to_be_bytes().as_slice(), element])
+        self.hash(&[&(*pos).to_be_bytes(), element])
     }
 
     /// Compute the digest of a byte slice.
     fn digest(&self, data: &[u8]) -> Self::Digest {
-        self.hash(core::iter::once(data))
+        self.hash(&[data])
     }
 
     /// Folds a peak digest into a running accumulator: `Hash(acc || peak)`.
     fn fold(&self, acc: &Self::Digest, peak: &Self::Digest) -> Self::Digest {
-        self.hash([acc.as_ref(), peak.as_ref()])
+        self.hash(&[acc, peak])
     }
 
     /// Computes a root using `inactive_peaks` and the bagging policy carried by `self`.
@@ -130,12 +126,12 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         };
 
         if committed_inactive_peaks == 0 {
-            Some(self.hash([(*leaves).to_be_bytes().as_slice(), folded_peaks.as_ref()]))
+            Some(self.hash(&[&(*leaves).to_be_bytes(), &folded_peaks]))
         } else {
-            Some(self.hash([
-                (*leaves).to_be_bytes().as_slice(),
-                (committed_inactive_peaks as u64).to_be_bytes().as_slice(),
-                folded_peaks.as_ref(),
+            Some(self.hash(&[
+                &(*leaves).to_be_bytes(),
+                &(committed_inactive_peaks as u64).to_be_bytes(),
+                &folded_peaks,
             ]))
         }
     }
@@ -147,10 +143,18 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
 /// one instance can be used with MMR, MMB, or any future family.
 ///
 /// The `bagging` field selects how peaks are folded into the root.
-#[derive(Clone)]
 pub struct Standard<H: CHasher> {
     _hasher: PhantomData<H>,
     bagging: Bagging,
+}
+
+impl<H: CHasher> Clone for Standard<H> {
+    fn clone(&self) -> Self {
+        Self {
+            _hasher: PhantomData,
+            bagging: self.bagging,
+        }
+    }
 }
 
 impl<H: CHasher> Standard<H> {
@@ -167,25 +171,21 @@ impl<H: CHasher> Standard<H> {
         self.bagging
     }
 
-    /// Hash an arbitrary sequence of byte slices into a single digest.
-    pub fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
-        let mut h = H::new();
-        for part in parts {
-            h.update(part);
-        }
-        h.finalize()
+    /// Hash a sequence of byte slices into a single digest.
+    pub fn hash(&self, parts: &[&[u8]]) -> H::Digest {
+        H::hash(parts)
     }
 
     /// Compute the digest of a byte slice.
     pub fn digest(&self, data: &[u8]) -> H::Digest {
-        self.hash(core::iter::once(data))
+        self.hash(&[data])
     }
 }
 
 impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     type Digest = H::Digest;
 
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> H::Digest {
+    fn hash(&self, parts: &[&[u8]]) -> H::Digest {
         Self::hash(self, parts)
     }
 
@@ -194,12 +194,10 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
     }
 }
 
-// Forward every method, not just the required ones: a `&T` bound must resolve to `T`'s
-// overrides (e.g. a grafting hasher's `node_digest`), never to the trait defaults.
 impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
     type Digest = T::Digest;
 
-    fn hash<'a>(&self, parts: impl IntoIterator<Item = &'a [u8]>) -> Self::Digest {
+    fn hash(&self, parts: &[&[u8]]) -> Self::Digest {
         (**self).hash(parts)
     }
 
@@ -326,7 +324,7 @@ mod tests {
     }
 
     fn test_digest<H: CHasher>(value: u8) -> H::Digest {
-        H::hash(&[value])
+        H::hash(&[&[value]])
     }
 
     fn test_leaf_digest<H: CHasher>() {
